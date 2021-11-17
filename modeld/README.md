@@ -10,6 +10,11 @@ Self driving car lane and path detection
       </a>
     </div>
 
+
+## Download model
+
+Download the [onnx model](https://github.com/commaai/openpilot/blob/8a6ed21e09e90268c0233b6ded258cf21abec097/models/supercombo.onnx) from Openpilot version 0.8.9.
+
 ## How to install
 
 To be able to run this, I recommend using Python 3.6 or up.
