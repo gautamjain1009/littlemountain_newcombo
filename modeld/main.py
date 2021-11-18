@@ -80,8 +80,7 @@ def transform_frames(frames):
     for i, img in tqdm(enumerate(frames)):
         imgs_med_model[i] = transform_img(img, from_intr=eon_intrinsics, to_intr=medmodel_intrinsics, yuv=True,
                                         output_size=(512, 256))
-    frame_tensors = frames_to_tensor(np.array(imgs_med_model)).astype(np.float32)/128.0 - 1.0
-    return frame_tensors
+    return np.array(imgs_med_model)
 
 
 def get_initial_inputs():
@@ -112,12 +111,18 @@ if __name__ == "__main__":
 
     bgr_frames = load_frames(input_video)
     yuv_frames = [bgr_to_yuv(frame) for frame in bgr_frames]
-    prepared_frames = transform_frames(yuv_frames)
+    transformed_frames = transform_frames(yuv_frames)
+
+    frame_tensors = frames_to_tensor(transformed_frames).astype(np.float32)/128.0 - 1.0
+
+    print('yuv_frames:', yuv_frames[0].shape)
+    print('transformed_frames:', transformed_frames[0].shape)
+    print('frame_tensors:', frame_tensors[0].shape)
 
     recurrent_state, desire, drive_convention = get_initial_inputs()
 
-    for i in tqdm(range(len(prepared_frames) - 1)):
-        stacked_frames = np.vstack(prepared_frames[i:i+2])[None]
+    for i in tqdm(range(len(frame_tensors) - 1)):
+        stacked_frames = np.vstack(frame_tensors[i:i+2])[None]
         assert stacked_frames.shape == (1, 12, 128, 256)
 
         outs, recurrent_state = forward_model(model, stacked_frames, recurrent_state, desire, drive_convention)
@@ -135,10 +140,10 @@ if __name__ == "__main__":
         best_idx = np.argmax(paths[:, -1], axis=0)
         best_path = paths[best_idx, :-1].reshape(2, 33, 15)
 
-        print('logprobs:', paths[:, -1])
-        print('best path', best_idx)
-        print('furthest distance (any path):', np.max(paths))
-        print('furthest distance (best path):', best_path[0, -1, 0])
+        # print('logprobs:', paths[:, -1])
+        # print('best path', best_idx)
+        # print('furthest distance (any path):', np.max(paths))
+        # print('furthest distance (best path):', best_path[0, -1, 0])
 
         lanelines = outs[:, 4955:5483]
         lane_dict = {}
@@ -156,10 +161,10 @@ if __name__ == "__main__":
         plt.clf()
         plt.title("lanes and path")
 
-        plt.plot(lane_dict["ll"][LANE_MEAN, :, LANE_Y], X_IDXS, "b-", linewidth=1)
-        plt.plot(lane_dict["rll"][LANE_MEAN, :, LANE_Y], X_IDXS, "r-", linewidth=1)
-        plt.plot(lane_dict["oll"][LANE_MEAN, :, LANE_Y], X_IDXS, "m-", linewidth=1)
-        plt.plot(lane_dict["orl"][LANE_MEAN, :, LANE_Y], X_IDXS, "k-", linewidth=1)
+        # plt.plot(lane_dict["ll"][LANE_MEAN, :, LANE_Y], X_IDXS, "b-", linewidth=1)
+        # plt.plot(lane_dict["rll"][LANE_MEAN, :, LANE_Y], X_IDXS, "r-", linewidth=1)
+        # plt.plot(lane_dict["oll"][LANE_MEAN, :, LANE_Y], X_IDXS, "m-", linewidth=1)
+        # plt.plot(lane_dict["orl"][LANE_MEAN, :, LANE_Y], X_IDXS, "k-", linewidth=1)
         plt.plot(best_path[PLAN_MEAN, :, PLAN_Y], best_path[PLAN_MEAN, :, PLAN_X], "g-", linewidth=1)
 
         plt.gca().invert_xaxis()
