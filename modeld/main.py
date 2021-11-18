@@ -25,6 +25,13 @@ X_IDXS = [
        168.75  , 180.1875, 192.]
 
 
+PLAN_MEAN = 0
+PLAN_X = 0
+PLAN_Y = 1
+LANE_MEAN = 0
+LANE_Y = 0
+
+
 def frames_to_tensor(frames):
     H = (frames.shape[1]*2)//3
     W = frames.shape[2]
@@ -64,11 +71,11 @@ def load_frames(video_path):
 
 def bgr_to_yuv(img_bgr):
     img_yuv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2YUV_I420)
-    img_yuv = img_yuv.reshape((874*3//2, 1164))  # FIXME: where does this come from?
+    img_yuv = img_yuv.reshape((874*3//2, 1164)) #TODO: why are we doing this?
     return img_yuv
 
 
-def frame_to_tensors(frames):
+def transform_frames(frames):
     imgs_med_model = np.zeros((len(frames), 384, 512), dtype=np.uint8)
     for i, img in tqdm(enumerate(frames)):
         imgs_med_model[i] = transform_img(img, from_intr=eon_intrinsics, to_intr=medmodel_intrinsics, yuv=True,
@@ -84,8 +91,8 @@ def get_initial_inputs():
     return recurrent_state, desire, drive_convention
 
 
-def forward_model(model, recurrent_state, desire, drive_convention):
-    inputs = {'input_imgs': np.vstack(frame_tensors[i:i+2])[None],
+def forward_model(model, input_imgs, recurrent_state, desire, drive_convention):
+    inputs = {'input_imgs': input_imgs,
               'initial_state': recurrent_state,
               'desire': desire,
               'traffic_convention': drive_convention
@@ -105,36 +112,33 @@ if __name__ == "__main__":
 
     bgr_frames = load_frames(input_video)
     yuv_frames = [bgr_to_yuv(frame) for frame in bgr_frames]
-    frame_tensors = frame_to_tensors(yuv_frames)
-
-    print(frame_tensors.shape)
+    prepared_frames = transform_frames(yuv_frames)
 
     recurrent_state, desire, drive_convention = get_initial_inputs()
 
-    for i in tqdm(range(len(frame_tensors) - 1)):
-        outs, recurrent_state = forward_model(model, recurrent_state, desire, drive_convention)
+    for i in tqdm(range(len(prepared_frames) - 1)):
+        stacked_frames = np.vstack(prepared_frames[i:i+2])[None]
+        assert stacked_frames.shape == (1, 12, 128, 256)
+
+        outs, recurrent_state = forward_model(model, stacked_frames, recurrent_state, desire, drive_convention)
 
         """
         INDEXING OF THE FOLLOWING OUTPUT VECTOR OF SIZE (1,6472)
         As already mentioned here:-- https://github.com/commaai/openpilot/tree/master/models
 
         """
-        path_dict = {}
         path_plans = outs[:, :4955]
 
-        # path1, path2, path3, path4, path5 = np.split(path_plans, 5, axis=1)
         paths = np.array(np.split(path_plans, 5, axis=1))
-        paths = paths.squeeze()
-        print(paths.shape)
-        print('probs:', paths[:, -1])
+        paths = paths.squeeze() # (5, 991)
 
-        print('super max:', np.max(paths))
+        best_idx = np.argmax(paths[:, -1], axis=0)
+        best_path = paths[best_idx, :-1].reshape(2, 33, 15)
 
-        best_path_idx = np.argmax(paths[:, -1], axis=0)
-        print('best path', best_path_idx)
-
-        best_path = paths[best_path_idx, :-1].reshape(2, 33, 15)
-        print('structured path:', best_path.shape)
+        print('logprobs:', paths[:, -1])
+        print('best path', best_idx)
+        print('furthest distance (any path):', np.max(paths))
+        print('furthest distance (best path):', best_path[0, -1, 0])
 
         lanelines = outs[:, 4955:5483]
         lane_dict = {}
@@ -152,22 +156,11 @@ if __name__ == "__main__":
         plt.clf()
         plt.title("lanes and path")
 
-        print('forward:', best_path[0, :, 0])
-        print('left:', best_path[0, :, 1])
-        print('down:', best_path[0, :, 2])
-
-        print('0 max:', np.max(best_path[0, :, :]))
-        print('0 argmax:', np.argmax(best_path[0, :, :]))
-
-        print('1 max:', np.max(best_path[1, :, :]))
-        print('1 argmax:', np.argmax(best_path[1, :, :]))
-
-
-        plt.plot(lane_dict["ll"][0, :, 0], X_IDXS, "b-", linewidth=1)
-        plt.plot(lane_dict["rll"][0, :, 0], X_IDXS, "r-", linewidth=1)
-        plt.plot(lane_dict["oll"][0, :, 0], X_IDXS, "m-", linewidth=1)
-        plt.plot(lane_dict["orl"][0, :, 0], X_IDXS, "k-", linewidth=1)
-        plt.plot(best_path[0, :, 1], best_path[0, :, 0], "g-", linewidth=1)
+        plt.plot(lane_dict["ll"][LANE_MEAN, :, LANE_Y], X_IDXS, "b-", linewidth=1)
+        plt.plot(lane_dict["rll"][LANE_MEAN, :, LANE_Y], X_IDXS, "r-", linewidth=1)
+        plt.plot(lane_dict["oll"][LANE_MEAN, :, LANE_Y], X_IDXS, "m-", linewidth=1)
+        plt.plot(lane_dict["orl"][LANE_MEAN, :, LANE_Y], X_IDXS, "k-", linewidth=1)
+        plt.plot(best_path[PLAN_MEAN, :, PLAN_Y], best_path[PLAN_MEAN, :, PLAN_X], "g-", linewidth=1)
 
         plt.gca().invert_xaxis()
         plt.pause(0.001)
