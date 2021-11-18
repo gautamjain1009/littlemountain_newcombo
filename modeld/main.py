@@ -6,8 +6,10 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import numpy as np
 from common.transformations.model import medmodel_intrinsics
-from common.transformations.camera import transform_img, eon_intrinsics
+from common.transformations.camera import transform_img, transform_img_cool, eon_intrinsics
+import os
 
+from tools.lib.logreader import LogReader
 
 MAX_DISTANCE = 140.
 LANE_OFFSET = 1.8
@@ -60,7 +62,11 @@ def load_frames(video_path):
     cap = cv2.VideoCapture(video_path)
     frames = []
 
+    pbar = tqdm(total=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
     while cap.isOpened():
+        # update tqdm
+        pbar.update(1)
+
         ret, frame = cap.read()
         if not ret: break
 
@@ -69,13 +75,27 @@ def load_frames(video_path):
     return frames
 
 
+def load_calibration(segment_path):
+    logs_file = os.path.join(segment_path, 'rlog.bz2')
+    lr = LogReader(logs_file)
+    liveCalibration = [m.liveCalibration for m in lr if m.which() == 'liveCalibration'] # probably not 1200, but 240
+    return liveCalibration
+
+
 def bgr_to_yuv(img_bgr):
     img_yuv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2YUV_I420)
     img_yuv = img_yuv.reshape((874*3//2, 1164)) #TODO: why are we doing this?
     return img_yuv
 
 
-def transform_frames(frames):
+def transform_frames_cool(frames, rpy):
+    imgs = np.zeros((len(frames), 384, 512), dtype=np.uint8)
+    for i, img in tqdm(enumerate(frames)):
+        imgs[i] = transform_img_cool(img, rpy)
+    return np.array(imgs)
+
+
+def transform_frames(frames, rpy):
     imgs_med_model = np.zeros((len(frames), 384, 512), dtype=np.uint8)
     for i, img in tqdm(enumerate(frames)):
         imgs_med_model[i] = transform_img(img, from_intr=eon_intrinsics, to_intr=medmodel_intrinsics, yuv=True,
@@ -106,18 +126,35 @@ def forward_model(model, input_imgs, recurrent_state, desire, drive_convention):
 
 
 if __name__ == "__main__":
-    input_video = sys.argv[1]  # '.../fcamera.hevc'
-    model = load_model()
+    segment = '/data/realdata/aba20ae4/06b5d227e8d0f0a632c4d0a7bd9e8f6e305ed1910848cd5597eecdfe8e6d0023/1b9935697c8f4671ca355e2acd851d99e249c50c9948256972c4b6b4b045fc8f/2021-09-14--09-19-21/20'
+    input_video = os.path.join(segment, 'fcamera.hevc')
+    calibrations = load_calibration(segment)
+
+    rpy_calib = list(calibrations[0].rpyCalib)
+    extrinsic_matrix_calib = calibrations[0].extrinsicMatrix
+
+    print('RPY:', rpy_calib)
 
     bgr_frames = load_frames(input_video)
     yuv_frames = [bgr_to_yuv(frame) for frame in bgr_frames]
-    transformed_frames = transform_frames(yuv_frames)
-
-    frame_tensors = frames_to_tensor(transformed_frames).astype(np.float32)/128.0 - 1.0
-
     print('yuv_frames:', yuv_frames[0].shape)
+    transformed_frames = transform_frames(yuv_frames, rpy_calib)
     print('transformed_frames:', transformed_frames[0].shape)
+    frame_tensors = frames_to_tensor(transformed_frames).astype(np.float32)/128.0 - 1.0
     print('frame_tensors:', frame_tensors[0].shape)
+
+    for img_idx in range(0, 1200, 100):
+        img_bgr = bgr_frames[img_idx]
+        # convert from BGR to RGB
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        img_transformed_yuv = transformed_frames[img_idx]
+        # convert from YUV to RGB
+        img_transformed_rgb = cv2.cvtColor(img_transformed_yuv, cv2.COLOR_YUV2RGB_I420)
+
+        plt.imsave(f'original-{img_idx}.png', img_rgb)
+        plt.imsave(f'transformed-{img_idx}.png', img_transformed_rgb)
+
+    model = load_model()
 
     recurrent_state, desire, drive_convention = get_initial_inputs()
 
@@ -140,10 +177,10 @@ if __name__ == "__main__":
         best_idx = np.argmax(paths[:, -1], axis=0)
         best_path = paths[best_idx, :-1].reshape(2, 33, 15)
 
-        # print('logprobs:', paths[:, -1])
-        # print('best path', best_idx)
-        # print('furthest distance (any path):', np.max(paths))
-        # print('furthest distance (best path):', best_path[0, -1, 0])
+        print('logprobs:', paths[:, -1])
+        print('best path', best_idx)
+        print('furthest distance (any path):', np.max(paths))
+        print('furthest distance (best path):', best_path[0, -1, 0])
 
         lanelines = outs[:, 4955:5483]
         lane_dict = {}

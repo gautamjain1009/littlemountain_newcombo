@@ -1,6 +1,7 @@
 import numpy as np
 import common.transformations.orientation as orient
 import math
+import cv2
 
 FULL_FRAME_SIZE = (1164, 874)
 W, H = FULL_FRAME_SIZE[0], FULL_FRAME_SIZE[1]
@@ -146,6 +147,26 @@ def pretransform_from_calib(calib):
   camera_frame_from_road_frame = np.dot(eon_intrinsics, view_frame_from_road_frame)
   camera_frame_from_calib_frame = get_camera_frame_from_calib_frame(camera_frame_from_road_frame)
   return np.linalg.inv(camera_frame_from_calib_frame)
+
+
+def transform_img_cool(base_img, 
+                       rpy,
+                       height=1.22,
+                       output_size=(512, 256),
+                       alpha=1.0,
+                       beta=0.0
+                       ):
+
+    calibration = rpy + [height]
+    transform = pretransform_from_calib(calibration) 
+
+    img_rgb = cv2.cvtColor(base_img, cv2.COLOR_YUV2RGB_I420)
+
+    transformed = cv2.warpPerspective(img_rgb, transform, output_size, borderMode=cv2.BORDER_REPLICATE)
+    transformed = np.clip((float(alpha)*transformed + beta), 0, 255).astype(np.uint8)
+    transformed_yuv = cv2.cvtColor(transformed, cv2.COLOR_RGB2YUV_I420)
+
+    return transformed_yuv
 
 
 def transform_img(base_img,
