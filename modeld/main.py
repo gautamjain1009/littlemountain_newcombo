@@ -9,8 +9,10 @@ from common.transformations.model import medmodel_intrinsics
 from common.transformations.camera import transform_img, transform_img_cool, eon_intrinsics
 import os
 
-from tools.lib.logreader import LogReader
+# from tools.lib.logreader import LogReader
 
+
+TRAJECTORY_SIZE = 33
 MAX_DISTANCE = 140.
 LANE_OFFSET = 1.8
 MAX_REL_V = 10.
@@ -32,6 +34,10 @@ PLAN_X = 0
 PLAN_Y = 1
 LANE_MEAN = 0
 LANE_Y = 0
+
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
 
 
 def frames_to_tensor(frames):
@@ -84,7 +90,7 @@ def load_calibration(segment_path):
 
 def bgr_to_yuv(img_bgr):
     img_yuv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2YUV_I420)
-    img_yuv = img_yuv.reshape((874*3//2, 1164)) #TODO: why are we doing this?
+    img_yuv = img_yuv.reshape((874*3//2, 1164))
     return img_yuv
 
 
@@ -95,7 +101,7 @@ def transform_frames_cool(frames, rpy):
     return np.array(imgs)
 
 
-def transform_frames(frames, rpy):
+def transform_frames(frames):
     imgs_med_model = np.zeros((len(frames), 384, 512), dtype=np.uint8)
     for i, img in tqdm(enumerate(frames)):
         imgs_med_model[i] = transform_img(img, from_intr=eon_intrinsics, to_intr=medmodel_intrinsics, yuv=True,
@@ -107,7 +113,48 @@ def get_initial_inputs():
     recurrent_state = np.zeros((1, 512), dtype=np.float32)
     desire = np.zeros((1, 8), dtype=np.float32)
     drive_convention = np.zeros((1, 2), dtype=np.float32)
+    drive_convention[0, 1] = 1.0 # right-hand-side
+
     return recurrent_state, desire, drive_convention
+
+
+# adopted from https://github.com/commaai/openpilot/blob/v0.8.9/selfdrive/modeld/models/driving.cc#L240-L274
+def parse_plan(data, columns=15, column_offset=0):
+    x_arr = [0] * TRAJECTORY_SIZE
+    y_arr = [0] * TRAJECTORY_SIZE
+    z_arr = [0] * TRAJECTORY_SIZE
+    x_std_arr = [0] * TRAJECTORY_SIZE
+    y_std_arr = [0] * TRAJECTORY_SIZE
+    z_std_arr = [0] * TRAJECTORY_SIZE
+
+    for i in range(TRAJECTORY_SIZE):
+        x_arr[i] = data[i*columns + 0 + column_offset]
+        x_std_arr[i] = data[columns*(TRAJECTORY_SIZE + i) + 0 + column_offset]
+
+        y_arr[i] = data[i*columns + 1 + column_offset]
+        y_std_arr[i] = data[columns*(TRAJECTORY_SIZE + i) + 1 + column_offset]
+
+        z_arr[i] = data[i*columns + 2 + column_offset]
+        z_std_arr[i] = data[columns*(TRAJECTORY_SIZE + i) + 2 + column_offset]
+
+    return x_arr, y_arr, z_arr, x_std_arr, y_std_arr, z_std_arr
+
+
+# adopted from https://github.com/commaai/openpilot/blob/v0.8.9/selfdrive/modeld/models/driving.cc#L240-L274
+def parse_laneline(data, columns=2, column_offset=-1):
+    y_arr = [0] * TRAJECTORY_SIZE
+    z_arr = [0] * TRAJECTORY_SIZE
+    y_std_arr = [0] * TRAJECTORY_SIZE
+    z_std_arr = [0] * TRAJECTORY_SIZE
+
+    for i in range(TRAJECTORY_SIZE):
+        y_arr[i] = data[i*columns + 1 + column_offset]
+        y_std_arr[i] = data[columns*(TRAJECTORY_SIZE + i) + 1 + column_offset]
+
+        z_arr[i] = data[i*columns + 2 + column_offset]
+        z_std_arr[i] = data[columns*(TRAJECTORY_SIZE + i) + 2 + column_offset]
+
+    return y_arr, z_arr, y_std_arr, z_std_arr
 
 
 def forward_model(model, input_imgs, recurrent_state, desire, drive_convention):
@@ -118,7 +165,7 @@ def forward_model(model, input_imgs, recurrent_state, desire, drive_convention):
               }
 
     outs = model.run(None, inputs)[0]
-    recurrent_state = outs[:, 5960:6472]
+    recurrent_state = outs[:, 5960:]
 
     assert recurrent_state.shape == (1, 512)
 
@@ -126,39 +173,24 @@ def forward_model(model, input_imgs, recurrent_state, desire, drive_convention):
 
 
 if __name__ == "__main__":
-    segment = '/data/realdata/aba20ae4/06b5d227e8d0f0a632c4d0a7bd9e8f6e305ed1910848cd5597eecdfe8e6d0023/1b9935697c8f4671ca355e2acd851d99e249c50c9948256972c4b6b4b045fc8f/2021-09-14--09-19-21/20'
+    # segment = '/data/realdata/aba20ae4/06b5d227e8d0f0a632c4d0a7bd9e8f6e305ed1910848cd5597eecdfe8e6d0023/1b9935697c8f4671ca355e2acd851d99e249c50c9948256972c4b6b4b045fc8f/2021-09-14--09-19-21/20'
+    segment = sys.argv[1]
+
     input_video = os.path.join(segment, 'fcamera.hevc')
-    calibrations = load_calibration(segment)
-
-    rpy_calib = list(calibrations[0].rpyCalib)
-    extrinsic_matrix_calib = calibrations[0].extrinsicMatrix
-
-    print('RPY:', rpy_calib)
+    # calibrations = load_calibration(segment)
 
     bgr_frames = load_frames(input_video)
     yuv_frames = [bgr_to_yuv(frame) for frame in bgr_frames]
-    print('yuv_frames:', yuv_frames[0].shape)
-    transformed_frames = transform_frames(yuv_frames, rpy_calib)
-    print('transformed_frames:', transformed_frames[0].shape)
-    frame_tensors = frames_to_tensor(transformed_frames).astype(np.float32)/128.0 - 1.0
-    print('frame_tensors:', frame_tensors[0].shape)
-
-    for img_idx in range(0, 1200, 100):
-        img_bgr = bgr_frames[img_idx]
-        # convert from BGR to RGB
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        img_transformed_yuv = transformed_frames[img_idx]
-        # convert from YUV to RGB
-        img_transformed_rgb = cv2.cvtColor(img_transformed_yuv, cv2.COLOR_YUV2RGB_I420)
-
-        plt.imsave(f'original-{img_idx}.png', img_rgb)
-        plt.imsave(f'transformed-{img_idx}.png', img_transformed_rgb)
+    transformed_frames = transform_frames(yuv_frames)
+    frame_tensors = frames_to_tensor(transformed_frames).astype(np.float32) # NOTE: should NOT be normalized
 
     model = load_model()
+    plt.figure(figsize=(3, 10))
 
     recurrent_state, desire, drive_convention = get_initial_inputs()
 
     for i in tqdm(range(len(frame_tensors) - 1)):
+        
         stacked_frames = np.vstack(frame_tensors[i:i+2])[None]
         assert stacked_frames.shape == (1, 12, 128, 256)
 
@@ -169,6 +201,7 @@ if __name__ == "__main__":
         As already mentioned here:-- https://github.com/commaai/openpilot/tree/master/models
 
         """
+        # PLAN
         path_plans = outs[:, :4955]
 
         paths = np.array(np.split(path_plans, 5, axis=1))
@@ -177,18 +210,38 @@ if __name__ == "__main__":
         best_idx = np.argmax(paths[:, -1], axis=0)
         best_path = paths[best_idx, :-1].reshape(2, 33, 15)
 
-        print('logprobs:', paths[:, -1])
-        print('best path', best_idx)
-        print('furthest distance (any path):', np.max(paths))
-        print('furthest distance (best path):', best_path[0, -1, 0])
-
+        # LANELINES
         lanelines = outs[:, 4955:5483]
         lane_dict = {}
         oll, ll, rll, orl = np.split(lanelines, 4, axis=1)
+
+        # using OP code
+        oll_y, oll_z, oll_y_std, oll_z_std = parse_laneline(oll[0])
+        ll_y, ll_z, ll_y_std, ll_z_std = parse_laneline(ll[0])
+        rll_y, rll_z, rll_y_std, rll_z_std = parse_laneline(rll[0])
+        orl_y, orl_z, orl_y_std, orl_z_std = parse_laneline(orl[0])
+
+        # our custom interpretation
         lane_dict["oll"] = oll.reshape(2, 33, 2)
         lane_dict["ll"] = ll.reshape(2, 33, 2)
         lane_dict["rll"] = rll.reshape(2, 33, 2)
         lane_dict["orl"] = orl.reshape(2, 33, 2)
+
+        # check our lanelines are correct (same as extracted with OP's `parse_laneline`)
+        assert np.all(oll_y == lane_dict["oll"][LANE_MEAN, :, LANE_Y])
+        assert np.all(ll_y == lane_dict["ll"][LANE_MEAN, :, LANE_Y])
+        assert np.all(rll_y == lane_dict["rll"][LANE_MEAN, :, LANE_Y])
+        assert np.all(orl_y == lane_dict["orl"][LANE_MEAN, :, LANE_Y])
+
+
+        # LANELINE PROBS
+        lanelines_probs = outs[:, 5483:5483+8]
+        lanelines_probs = lanelines_probs.reshape(4, 2)
+        lanelines_probs = sigmoid(lanelines_probs)
+        print('lprobs (deprecated?):', lanelines_probs[:, 0])
+        print('lprobs:', lanelines_probs[:, 1])
+
+        oll_prob, ll_prob, rll_prob, orl_prob = lanelines_probs[:, 1].tolist()
 
         # Show raw camera image
         frame = cv2.resize(bgr_frames[i], (640, 420))
@@ -197,14 +250,24 @@ if __name__ == "__main__":
         # Clean plot for next frame
         plt.clf()
         plt.title("lanes and path")
+        plt.xlim(-10, 10)
+        plt.ylim(-1, 196)
 
-        # plt.plot(lane_dict["ll"][LANE_MEAN, :, LANE_Y], X_IDXS, "b-", linewidth=1)
-        # plt.plot(lane_dict["rll"][LANE_MEAN, :, LANE_Y], X_IDXS, "r-", linewidth=1)
-        # plt.plot(lane_dict["oll"][LANE_MEAN, :, LANE_Y], X_IDXS, "m-", linewidth=1)
-        # plt.plot(lane_dict["orl"][LANE_MEAN, :, LANE_Y], X_IDXS, "k-", linewidth=1)
+
+
+        # Plot lane lines FIXME: these are bogus, what's up?
+        #
+        # (almost) correct lanelines here: (graphically but not semantically)
+        # https://github.com/MTammvee/openpilot-supercombo-model
+        plt.plot(ll_y, X_IDXS, "b-", linewidth=1, alpha=ll_prob)
+        plt.plot(rll_y, X_IDXS, "r-", linewidth=1, alpha=rll_prob)
+        plt.plot(oll_y, X_IDXS, "m-", linewidth=1, alpha=oll_prob)
+        plt.plot(orl_y, X_IDXS, "k-", linewidth=1, alpha=orl_prob)
+
+        # best path plan
         plt.plot(best_path[PLAN_MEAN, :, PLAN_Y], best_path[PLAN_MEAN, :, PLAN_X], "g-", linewidth=1)
 
-        plt.gca().invert_xaxis()
+        # plt.gca().invert_xaxis()
         plt.pause(0.001)
         if cv2.waitKey(10) & 0xFF == ord('q'):
             break
